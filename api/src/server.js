@@ -1,0 +1,243 @@
+import crypto from 'node:crypto';
+import express from 'express';
+import bcrypt from 'bcryptjs';
+import pg from 'pg';
+import { OAuth2Client } from 'google-auth-library';
+
+const {
+  DATABASE_URL,
+  ADMIN_USERNAME = 'admin',
+  ADMIN_PASSWORD,
+  GOOGLE_CLIENT_ID = '',
+  COOKIE_SECURE = 'true',
+  PORT = 3000,
+} = process.env;
+
+const SESSION_DAYS = 7;
+const MAX_FAILED = 5;
+const LOCK_MINUTES = 15;
+const MIN_PASSWORD = 10;
+
+const pool = new pg.Pool({ connectionString: DATABASE_URL });
+const google = GOOGLE_CLIENT_ID ? new OAuth2Client(GOOGLE_CLIENT_ID) : null;
+const app = express();
+app.use(express.json({ limit: '100kb' }));
+
+const q = (text, params) => pool.query(text, params);
+
+// ---------- sessions ----------
+
+function readCookie(req, name) {
+  const pair = (req.headers.cookie || '').split(';').map((s) => s.trim()).find((s) => s.startsWith(name + '='));
+  return pair ? decodeURIComponent(pair.slice(name.length + 1)) : null;
+}
+
+async function startSession(res, userId) {
+  const token = crypto.randomBytes(32).toString('hex');
+  await q(`INSERT INTO sessions (token, user_id, expires_at) VALUES ($1, $2, now() + interval '${SESSION_DAYS} days')`, [token, userId]);
+  const secure = COOKIE_SECURE === 'true' ? '; Secure' : '';
+  res.setHeader('Set-Cookie', `sid=${token}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${SESSION_DAYS * 86400}${secure}`);
+}
+
+async function currentUser(req) {
+  const token = readCookie(req, 'sid');
+  if (!token) return null;
+  const { rows } = await q(
+    `SELECT u.id, u.username, u.email, u.name, u.role FROM sessions s JOIN users u ON u.id = s.user_id
+     WHERE s.token = $1 AND s.expires_at > now() AND u.status = 'active'`,
+    [token],
+  );
+  return rows[0] || null;
+}
+
+const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
+
+const requireAdmin = wrap(async (req, res, next) => {
+  const user = await currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in' });
+  if (user.role !== 'admin') return res.status(403).json({ error: 'Admins only' });
+  req.user = user;
+  next();
+});
+
+// ---------- auth ----------
+
+app.get('/api/config', (req, res) => res.json({ googleClientId: GOOGLE_CLIENT_ID }));
+
+app.get('/api/me', wrap(async (req, res) => {
+  const user = await currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Not logged in' });
+  res.json(user);
+}));
+
+app.post('/api/login', wrap(async (req, res) => {
+  const { username, password } = req.body || {};
+  const fail = () => res.status(401).json({ error: 'Wrong username or password' });
+  if (typeof username !== 'string' || typeof password !== 'string') return fail();
+
+  const { rows } = await q('SELECT * FROM users WHERE username = $1', [username]);
+  const user = rows[0];
+  if (!user || !user.password_hash) return fail();
+  if (user.locked_until && user.locked_until > new Date()) {
+    return res.status(423).json({ error: `Too many failed attempts. Try again in ${LOCK_MINUTES} minutes.` });
+  }
+  if (!(await bcrypt.compare(password, user.password_hash))) {
+    const lock = user.failed_attempts + 1 >= MAX_FAILED;
+    await q(
+      `UPDATE users SET failed_attempts = $2,
+         locked_until = CASE WHEN $3 THEN now() + interval '${LOCK_MINUTES} minutes' ELSE NULL END
+       WHERE id = $1`,
+      [user.id, lock ? 0 : user.failed_attempts + 1, lock],
+    );
+    return fail();
+  }
+  if (user.status !== 'active') return res.status(403).json({ error: 'This account is not active' });
+
+  await q('UPDATE users SET failed_attempts = 0, locked_until = NULL WHERE id = $1', [user.id]);
+  await startSession(res, user.id);
+  res.json({ ok: true });
+}));
+
+// Sign in with Google. An unknown Gmail address becomes an application the admin approves.
+app.post('/api/login/google', wrap(async (req, res) => {
+  if (!google) return res.status(400).json({ error: 'Google sign-in is not set up yet' });
+  let payload;
+  try {
+    const ticket = await google.verifyIdToken({ idToken: req.body?.credential, audience: GOOGLE_CLIENT_ID });
+    payload = ticket.getPayload();
+  } catch {
+    return res.status(401).json({ error: 'Google sign-in failed' });
+  }
+  if (!payload.email_verified) return res.status(401).json({ error: 'Google email is not verified' });
+
+  const email = payload.email.toLowerCase();
+  const { rows } = await q('SELECT * FROM users WHERE email = $1', [email]);
+  const user = rows[0];
+  if (!user) {
+    await q('INSERT INTO users (email, name) VALUES ($1, $2)', [email, payload.name || email]);
+    return res.status(202).json({ status: 'pending', message: 'Thanks for applying. The admin will review your request.' });
+  }
+  if (user.status === 'pending') return res.status(202).json({ status: 'pending', message: 'Your application is waiting for admin approval.' });
+  if (user.status === 'rejected') return res.status(403).json({ error: 'Your application was not approved.' });
+
+  await startSession(res, user.id);
+  res.json({ ok: true });
+}));
+
+app.post('/api/logout', wrap(async (req, res) => {
+  const token = readCookie(req, 'sid');
+  if (token) await q('DELETE FROM sessions WHERE token = $1', [token]);
+  res.setHeader('Set-Cookie', 'sid=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0');
+  res.json({ ok: true });
+}));
+
+// ---------- configuration (admin only) ----------
+
+// Each configuration list: table, key column, editable fields.
+const LISTS = {
+  'family-members': { table: 'family_members', key: 'id', fields: ['name'] },
+  categories: { table: 'categories', key: 'id', fields: ['name', 'colour'] },
+  providers: { table: 'providers', key: 'id', fields: ['name', 'category_id'] },
+  'payment-modes': { table: 'payment_modes', key: 'id', fields: ['name'] },
+  currencies: { table: 'currencies', key: 'code', fields: ['code', 'name'] },
+};
+
+function pickFields(list, body) {
+  const values = list.fields.map((f) => {
+    const v = body?.[f];
+    return v === '' || v === undefined ? null : v;
+  });
+  if (values[0] === null) throw Object.assign(new Error(`${list.fields[0]} is required`), { status: 400 });
+  return values;
+}
+
+app.get('/api/config/:list', requireAdmin, wrap(async (req, res) => {
+  const list = LISTS[req.params.list];
+  if (!list) return res.sendStatus(404);
+  const { rows } = await q(`SELECT * FROM ${list.table} ORDER BY ${list.fields[0]}`);
+  res.json(rows);
+}));
+
+app.post('/api/config/:list', requireAdmin, wrap(async (req, res) => {
+  const list = LISTS[req.params.list];
+  if (!list) return res.sendStatus(404);
+  const values = pickFields(list, req.body);
+  const cols = list.fields.join(', ');
+  const params = list.fields.map((_, i) => `$${i + 1}`).join(', ');
+  const { rows } = await q(`INSERT INTO ${list.table} (${cols}) VALUES (${params}) RETURNING *`, values);
+  res.status(201).json(rows[0]);
+}));
+
+app.put('/api/config/:list/:key', requireAdmin, wrap(async (req, res) => {
+  const list = LISTS[req.params.list];
+  if (!list) return res.sendStatus(404);
+  const values = pickFields(list, req.body);
+  const sets = list.fields.map((f, i) => `${f} = $${i + 1}`).join(', ');
+  const { rows } = await q(
+    `UPDATE ${list.table} SET ${sets} WHERE ${list.key} = $${values.length + 1} RETURNING *`,
+    [...values, req.params.key],
+  );
+  if (!rows[0]) return res.sendStatus(404);
+  res.json(rows[0]);
+}));
+
+app.delete('/api/config/:list/:key', requireAdmin, wrap(async (req, res) => {
+  const list = LISTS[req.params.list];
+  if (!list) return res.sendStatus(404);
+  await q(`DELETE FROM ${list.table} WHERE ${list.key} = $1`, [req.params.key]);
+  res.json({ ok: true });
+}));
+
+// Users: approve or reject Gmail applications.
+app.get('/api/users', requireAdmin, wrap(async (req, res) => {
+  const { rows } = await q('SELECT id, username, email, name, role, status, created_at FROM users ORDER BY created_at');
+  res.json(rows);
+}));
+
+app.put('/api/users/:id/status', requireAdmin, wrap(async (req, res) => {
+  const { status } = req.body || {};
+  if (!['active', 'rejected'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
+  if (Number(req.params.id) === req.user.id) return res.status(400).json({ error: 'You cannot change your own account' });
+  await q('UPDATE users SET status = $2 WHERE id = $1', [req.params.id, status]);
+  if (status !== 'active') await q('DELETE FROM sessions WHERE user_id = $1', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+// ---------- errors and startup ----------
+
+app.use((err, req, res, next) => {
+  if (err.status) return res.status(err.status).json({ error: err.message });
+  if (err.code === '23505') return res.status(409).json({ error: 'That already exists' });
+  if (err.code === '23503') return res.status(409).json({ error: 'It is still in use' });
+  console.error(err);
+  res.status(500).json({ error: 'Something went wrong' });
+});
+
+async function ensureAdmin() {
+  const { rows } = await q("SELECT 1 FROM users WHERE role = 'admin'");
+  if (rows.length) return;
+  if (!ADMIN_PASSWORD || ADMIN_PASSWORD.length < MIN_PASSWORD) {
+    throw new Error(`Set ADMIN_PASSWORD (at least ${MIN_PASSWORD} characters) to create the admin account`);
+  }
+  const hash = await bcrypt.hash(ADMIN_PASSWORD, 12);
+  await q("INSERT INTO users (username, name, password_hash, role, status) VALUES ($1, 'Admin', $2, 'admin', 'active')", [ADMIN_USERNAME, hash]);
+  console.log(`Created admin account "${ADMIN_USERNAME}"`);
+}
+
+async function start() {
+  for (let i = 0; ; i++) {
+    try {
+      await ensureAdmin();
+      break;
+    } catch (err) {
+      if (err.message.startsWith('Set ADMIN_PASSWORD') || i >= 30) throw err;
+      await new Promise((r) => setTimeout(r, 2000)); // database still starting
+    }
+  }
+  app.listen(PORT, () => console.log(`API listening on ${PORT}`));
+}
+
+start().catch((err) => {
+  console.error(err.message);
+  process.exit(1);
+});

@@ -1,0 +1,33 @@
+# Secrets and credentials: never commit these
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.crt
+*.p12
+*.pfx
+secrets/
+certs/
+client_secret*.json
+credentials*.json
+
+# Dependencies and build output
+node_modules/
+dist/
+build/
+coverage/
+
+# Database data and backups
+pgdata/
+backups/
+*.sql.gz
+*.dump
+
+# Logs and editor/OS files
+*.log
+npm-debug.log*
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

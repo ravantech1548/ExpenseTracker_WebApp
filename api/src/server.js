@@ -52,6 +52,13 @@ async function currentUser(req) {
 
 const wrap = (fn) => (req, res, next) => fn(req, res, next).catch(next);
 
+const requireUser = wrap(async (req, res, next) => {
+  const user = await currentUser(req);
+  if (!user) return res.status(401).json({ error: 'Please log in' });
+  req.user = user;
+  next();
+});
+
 const requireAdmin = wrap(async (req, res, next) => {
   const user = await currentUser(req);
   if (!user) return res.status(401).json({ error: 'Please log in' });
@@ -194,6 +201,14 @@ app.get('/api/users', requireAdmin, wrap(async (req, res) => {
   res.json(rows);
 }));
 
+app.post('/api/users', requireAdmin, wrap(async (req, res) => {
+  const email = String(req.body?.email || '').trim().toLowerCase();
+  const name = String(req.body?.name || '').trim() || email;
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(email)) return res.status(400).json({ error: 'Enter a valid email address' });
+  await q("INSERT INTO users (email, name, status) VALUES ($1, $2, 'active')", [email, name]);
+  res.status(201).json({ ok: true });
+}));
+
 app.put('/api/users/:id/status', requireAdmin, wrap(async (req, res) => {
   const { status } = req.body || {};
   if (!['active', 'rejected'].includes(status)) return res.status(400).json({ error: 'Invalid status' });
@@ -203,15 +218,102 @@ app.put('/api/users/:id/status', requireAdmin, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- expenses (any approved user) ----------
+
+// Lists needed by the expense form.
+app.get('/api/lookups', requireUser, wrap(async (req, res) => {
+  const [categories, providers, paymentModes, currencies, members] = await Promise.all([
+    q('SELECT * FROM categories ORDER BY name'),
+    q('SELECT * FROM providers ORDER BY name'),
+    q('SELECT * FROM payment_modes ORDER BY name'),
+    q('SELECT * FROM currencies ORDER BY code'),
+    q('SELECT * FROM family_members ORDER BY name'),
+  ]);
+  res.json({
+    categories: categories.rows,
+    providers: providers.rows,
+    paymentModes: paymentModes.rows,
+    currencies: currencies.rows,
+    members: members.rows,
+  });
+}));
+
+const EXPENSE_FIELDS = ['spent_on', 'category_id', 'provider_id', 'amount', 'currency', 'payment_mode_id', 'member_id'];
+
+function expenseValues(body) {
+  const v = EXPENSE_FIELDS.map((f) => (body?.[f] === '' || body?.[f] === undefined ? null : body[f]));
+  const [spentOn, categoryId, , amount, currency] = v;
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(spentOn || '')) throw Object.assign(new Error('Date is required'), { status: 400 });
+  if (!categoryId) throw Object.assign(new Error('Category is required'), { status: 400 });
+  if (!(Number(amount) > 0)) throw Object.assign(new Error('Amount must be more than 0'), { status: 400 });
+  if (!currency) throw Object.assign(new Error('Currency is required'), { status: 400 });
+  return v;
+}
+
+app.get('/api/expenses', requireUser, wrap(async (req, res) => {
+  const month = /^\d{4}-\d{2}$/.test(req.query.month || '') ? req.query.month : new Date().toISOString().slice(0, 7);
+  const { rows } = await q(
+    `SELECT e.*, to_char(e.spent_on, 'YYYY-MM-DD') AS spent_on, u.name AS created_by_name
+     FROM expenses e LEFT JOIN users u ON u.id = e.created_by
+     WHERE e.spent_on >= to_date($1, 'YYYY-MM') AND e.spent_on < to_date($1, 'YYYY-MM') + interval '1 month'
+     ORDER BY e.spent_on DESC, e.id DESC`,
+    [month],
+  );
+  res.json({ month, expenses: rows });
+}));
+
+app.post('/api/expenses', requireUser, wrap(async (req, res) => {
+  const values = expenseValues(req.body);
+  const { rows } = await q(
+    `INSERT INTO expenses (${EXPENSE_FIELDS.join(', ')}, created_by) VALUES ($1, $2, $3, $4, $5, $6, $7, $8) RETURNING id`,
+    [...values, req.user.id],
+  );
+  res.status(201).json(rows[0]);
+}));
+
+app.put('/api/expenses/:id', requireUser, wrap(async (req, res) => {
+  const values = expenseValues(req.body);
+  const sets = EXPENSE_FIELDS.map((f, i) => `${f} = $${i + 1}`).join(', ');
+  const { rowCount } = await q(`UPDATE expenses SET ${sets} WHERE id = $8`, [...values, req.params.id]);
+  if (!rowCount) return res.sendStatus(404);
+  res.json({ ok: true });
+}));
+
+app.delete('/api/expenses/:id', requireUser, wrap(async (req, res) => {
+  await q('DELETE FROM expenses WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+}));
+
 // ---------- errors and startup ----------
 
 app.use((err, req, res, next) => {
   if (err.status) return res.status(err.status).json({ error: err.message });
   if (err.code === '23505') return res.status(409).json({ error: 'That already exists' });
-  if (err.code === '23503') return res.status(409).json({ error: 'It is still in use' });
+  if (err.code === '23503') {
+    const missing = /is not present/.test(err.detail || '');
+    return res.status(409).json({ error: missing ? 'One of the choices no longer exists. Please reload.' : 'It is still in use' });
+  }
+  if (err.code === '22P02' || err.code === '22003') return res.status(400).json({ error: 'Please check the values entered' });
   console.error(err);
   res.status(500).json({ error: 'Something went wrong' });
 });
+
+// Tables added after slice 1. db/init.sql only runs on a brand-new database.
+async function migrate() {
+  await q(`
+    CREATE TABLE IF NOT EXISTS expenses (
+      id              SERIAL PRIMARY KEY,
+      spent_on        DATE NOT NULL,
+      category_id     INT NOT NULL REFERENCES categories(id),
+      provider_id     INT REFERENCES providers(id),
+      amount          NUMERIC(12, 2) NOT NULL CHECK (amount > 0),
+      currency        TEXT NOT NULL REFERENCES currencies(code) ON UPDATE CASCADE,
+      payment_mode_id INT REFERENCES payment_modes(id),
+      member_id       INT REFERENCES family_members(id),  -- NULL means a common Family expense
+      created_by      INT REFERENCES users(id) ON DELETE SET NULL,
+      created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
+    )`);
+}
 
 async function ensureAdmin() {
   const { rows } = await q("SELECT 1 FROM users WHERE role = 'admin'");
@@ -227,6 +329,7 @@ async function ensureAdmin() {
 async function start() {
   for (let i = 0; ; i++) {
     try {
+      await migrate();
       await ensureAdmin();
       break;
     } catch (err) {

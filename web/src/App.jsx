@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api } from './api.js';
 import Login from './pages/Login.jsx';
 import Config from './pages/Config.jsx';
+import Expenses from './pages/Expenses.jsx';
 
 export default function App() {
   const [user, setUser] = useState(undefined);
@@ -24,7 +25,7 @@ export default function App() {
       <header className="topbar">
         <span className="brand">Family Expense Tracker</span>
         <nav>
-          <button className={page === 'home' ? 'active' : ''} onClick={() => setPage('home')}>Home</button>
+          <button className={page === 'home' ? 'active' : ''} onClick={() => setPage('home')}>Expenses</button>
           {user.role === 'admin' && (
             <button className={page === 'config' ? 'active' : ''} onClick={() => setPage('config')}>Configuration</button>
           )}
@@ -35,12 +36,7 @@ export default function App() {
         </span>
       </header>
       <main>
-        {page === 'home' && (
-          <div className="card">
-            <h2>Welcome, {user.name}</h2>
-            <p>Expenses and the dashboard arrive in the next slices.</p>
-          </div>
-        )}
+        {page === 'home' && <Expenses />}
         {page === 'config' && <Config />}
       </main>
     </>

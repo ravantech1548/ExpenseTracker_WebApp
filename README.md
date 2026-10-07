@@ -9,6 +9,14 @@ React frontend, Node.js (Express) API and Postgres, each in its own Docker conta
 - "Continue with Google": a new Gmail address becomes an application. The admin approves or rejects it under Configuration > Users.
 - Configuration menu (admin only): family members, categories (with colours), service providers, payment modes, currencies, users.
 
+## Slice 2: add an expense and see the month
+
+- Any approved user can add, edit and delete expenses, and everyone sees all expenses.
+- Fields: date, category, service provider, amount, currency, payment mode, and Family (common) or a named member (personal).
+- The month view has previous/next arrows, a total per category, and a grand total. SGD and INR totals are shown separately, with no conversion yet.
+- Admin can add approved Gmail addresses under Configuration > Users.
+- New tables are created by the API on start-up, so an existing slice-1 database keeps its data.
+
 ## Run it
 
 ```bash

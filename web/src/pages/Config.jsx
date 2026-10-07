@@ -147,6 +147,8 @@ function ListEditor({ list }) {
 function Users() {
   const [rows, setRows] = useState([]);
   const [error, setError] = useState('');
+  const [email, setEmail] = useState('');
+  const [name, setName] = useState('');
   const load = () => api('/users').then((r) => setRows(r.data)).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
 
@@ -160,10 +162,26 @@ function Users() {
     }
   }
 
+  async function add(e) {
+    e.preventDefault();
+    setError('');
+    try {
+      await api('/users', { method: 'POST', body: { email, name } });
+      setEmail('');
+      setName('');
+      load();
+    } catch (err) {
+      setError(err.message);
+    }
+  }
+
   return (
     <>
       <h2>Users</h2>
-      <p className="hint">People who continue with Google appear here as "pending" until you approve them.</p>
+      <p className="hint">
+        Add a Gmail address to approve it in advance, so that person can sign in with Google straight away.
+        People who apply themselves appear here as "pending" until you approve them.
+      </p>
       <table>
         <thead>
           <tr><th>Name</th><th>Login</th><th>Role</th><th>Status</th><th /></tr>
@@ -189,6 +207,11 @@ function Users() {
           ))}
         </tbody>
       </table>
+      <form className="add-form" onSubmit={add}>
+        <label>Gmail address<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} required /></label>
+        <label>Name<input value={name} onChange={(e) => setName(e.target.value)} /></label>
+        <button type="submit" className="primary">Add approved user</button>
+      </form>
       {error && <p className="error">{error}</p>}
     </>
   );

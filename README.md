@@ -17,6 +17,13 @@ React frontend, Node.js (Express) API and Postgres, each in its own Docker conta
 - Admin can add approved Gmail addresses under Configuration > Users.
 - New tables are created by the API on start-up, so an existing slice-1 database keeps its data.
 
+## Slice 3: monthly recurring bills
+
+- Bills page: set up monthly bills (name, category, provider, Family or member, currency, due day, usual amount and payment mode).
+- Monthly checklist with due dates. Unpaid bills past their due date show as Overdue.
+- "Mark paid" asks for the amount, payment mode and paid date, and adds the bill to Expenses. The amount is pre-filled with what was paid last time, or the usual amount. "Undo" removes that expense.
+- A due day of 29 to 31 falls on the last day of shorter months.
+
 ## Run it
 
 ```bash

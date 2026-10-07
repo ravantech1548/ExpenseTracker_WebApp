@@ -116,3 +116,16 @@ th.num, td.num { text-align: right; white-space: nowrap; }
 .total-row td { font-weight: 700; color: var(--eggplant); border-bottom: none; }
 .card table { margin-bottom: 0; }
 .card { overflow-x: auto; }
+
+/* Bills */
+.status.overdue { background: var(--eggplant); color: var(--white); }
+tr.overdue td:first-child { color: var(--eggplant); font-weight: 600; }
+td:first-child { white-space: nowrap; }
+.amount-input { display: inline-flex; align-items: center; gap: 6px; }
+.amount-input input { width: 110px; text-align: right; }
+td select, td input[type='date'] { min-width: 130px; }
+button.primary.small { padding: 7px 12px; font-size: 0.9rem; }
+.bill-form { margin-top: 24px; border-top: 1px solid var(--border); padding-top: 16px; }
+.bill-form .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
+label.checkbox { flex-direction: row; align-items: center; margin-top: 12px; }
+label.checkbox input { width: auto; }

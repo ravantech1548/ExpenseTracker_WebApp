@@ -284,6 +284,91 @@ app.delete('/api/expenses/:id', requireUser, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+// ---------- recurring bills (any approved user) ----------
+
+const BILL_FIELDS = ['name', 'category_id', 'provider_id', 'member_id', 'currency', 'usual_amount', 'due_day', 'payment_mode_id', 'active'];
+const bad = (msg) => Object.assign(new Error(msg), { status: 400 });
+
+function billValues(body) {
+  const v = BILL_FIELDS.map((f) => (body?.[f] === '' || body?.[f] === undefined ? null : body[f]));
+  const [name, categoryId, , , currency, usualAmount, dueDay] = v;
+  if (!String(name || '').trim()) throw bad('Name is required');
+  if (!categoryId) throw bad('Category is required');
+  if (!currency) throw bad('Currency is required');
+  if (usualAmount !== null && !(Number(usualAmount) > 0)) throw bad('Usual amount must be more than 0');
+  if (!(Number(dueDay) >= 1 && Number(dueDay) <= 31)) throw bad('Due day must be between 1 and 31');
+  v[8] = v[8] !== false; // active defaults to true
+  return v;
+}
+
+app.get('/api/bills', requireUser, wrap(async (req, res) => {
+  const { rows } = await q('SELECT * FROM bills ORDER BY due_day, name');
+  res.json(rows);
+}));
+
+app.post('/api/bills', requireUser, wrap(async (req, res) => {
+  const values = billValues(req.body);
+  const params = BILL_FIELDS.map((_, i) => `$${i + 1}`).join(', ');
+  const { rows } = await q(`INSERT INTO bills (${BILL_FIELDS.join(', ')}) VALUES (${params}) RETURNING id`, values);
+  res.status(201).json(rows[0]);
+}));
+
+app.put('/api/bills/:id', requireUser, wrap(async (req, res) => {
+  const values = billValues(req.body);
+  const sets = BILL_FIELDS.map((f, i) => `${f} = $${i + 1}`).join(', ');
+  const { rowCount } = await q(`UPDATE bills SET ${sets} WHERE id = $${values.length + 1}`, [...values, req.params.id]);
+  if (!rowCount) return res.sendStatus(404);
+  res.json({ ok: true });
+}));
+
+// Deleting a bill keeps its past payments as ordinary expenses.
+app.delete('/api/bills/:id', requireUser, wrap(async (req, res) => {
+  await q('DELETE FROM bills WHERE id = $1', [req.params.id]);
+  res.json({ ok: true });
+}));
+
+// The month's checklist: each active bill with its due date, payment (if paid) and a suggested amount.
+app.get('/api/bills/checklist', requireUser, wrap(async (req, res) => {
+  if (!/^\d{4}-\d{2}$/.test(req.query.month || '')) throw bad('Month is required');
+  const { rows } = await q(
+    `SELECT b.*,
+       to_char(to_date($1, 'YYYY-MM') + (LEAST(b.due_day,
+         EXTRACT(DAY FROM to_date($1, 'YYYY-MM') + interval '1 month' - interval '1 day')::int) - 1), 'YYYY-MM-DD') AS due_on,
+       e.id AS expense_id, e.amount AS paid_amount, e.currency AS paid_currency,
+       e.payment_mode_id AS paid_payment_mode_id, to_char(e.spent_on, 'YYYY-MM-DD') AS paid_on,
+       COALESCE((SELECT l.amount FROM expenses l WHERE l.bill_id = b.id ORDER BY l.bill_month DESC LIMIT 1), b.usual_amount) AS suggested_amount
+     FROM bills b
+     LEFT JOIN expenses e ON e.bill_id = b.id AND e.bill_month = to_date($1, 'YYYY-MM')
+     WHERE b.active OR e.id IS NOT NULL
+     ORDER BY b.due_day, b.name`,
+    [req.query.month],
+  );
+  res.json(rows);
+}));
+
+// Mark a bill paid for a month: records it as an expense.
+app.post('/api/bills/:id/pay', requireUser, wrap(async (req, res) => {
+  const { month, amount, payment_mode_id: paymentModeId, paid_on: paidOn } = req.body || {};
+  if (!/^\d{4}-\d{2}$/.test(month || '')) throw bad('Month is required');
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(paidOn || '')) throw bad('Paid date is required');
+  if (!(Number(amount) > 0)) throw bad('Amount must be more than 0');
+  if (!paymentModeId) throw bad('Choose a payment mode');
+  const { rows } = await q('SELECT * FROM bills WHERE id = $1', [req.params.id]);
+  const bill = rows[0];
+  if (!bill) return res.sendStatus(404);
+  try {
+    await q(
+      `INSERT INTO expenses (spent_on, category_id, provider_id, amount, currency, payment_mode_id, member_id, created_by, bill_id, bill_month)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, to_date($10, 'YYYY-MM'))`,
+      [paidOn, bill.category_id, bill.provider_id, amount, bill.currency, paymentModeId, bill.member_id, req.user.id, bill.id, month],
+    );
+  } catch (err) {
+    if (err.code === '23505') return res.status(409).json({ error: 'This bill is already paid for that month' });
+    throw err;
+  }
+  res.status(201).json({ ok: true });
+}));
+
 // ---------- errors and startup ----------
 
 app.use((err, req, res, next) => {
@@ -313,6 +398,23 @@ async function migrate() {
       created_by      INT REFERENCES users(id) ON DELETE SET NULL,
       created_at      TIMESTAMPTZ NOT NULL DEFAULT now()
     )`);
+  // Slice 3: monthly recurring bills. Paying a bill creates an expense linked to that bill and month.
+  await q(`
+    CREATE TABLE IF NOT EXISTS bills (
+      id              SERIAL PRIMARY KEY,
+      name            TEXT NOT NULL,
+      category_id     INT NOT NULL REFERENCES categories(id),
+      provider_id     INT REFERENCES providers(id),
+      member_id       INT REFERENCES family_members(id),  -- NULL means a common Family bill
+      currency        TEXT NOT NULL REFERENCES currencies(code) ON UPDATE CASCADE,
+      usual_amount    NUMERIC(12, 2) CHECK (usual_amount > 0),
+      due_day         INT NOT NULL CHECK (due_day BETWEEN 1 AND 31),
+      payment_mode_id INT REFERENCES payment_modes(id),
+      active          BOOLEAN NOT NULL DEFAULT true
+    )`);
+  await q('ALTER TABLE expenses ADD COLUMN IF NOT EXISTS bill_id INT REFERENCES bills(id) ON DELETE SET NULL');
+  await q('ALTER TABLE expenses ADD COLUMN IF NOT EXISTS bill_month DATE');
+  await q('CREATE UNIQUE INDEX IF NOT EXISTS expenses_bill_month ON expenses (bill_id, bill_month)');
 }
 
 async function ensureAdmin() {

@@ -4,6 +4,7 @@ import Login from './pages/Login.jsx';
 import Config from './pages/Config.jsx';
 import Expenses from './pages/Expenses.jsx';
 import Bills from './pages/Bills.jsx';
+import SummaryPage from './pages/Summary.jsx';
 
 export default function App() {
   const [user, setUser] = useState(undefined);
@@ -28,6 +29,7 @@ export default function App() {
         <nav>
           <button className={page === 'home' ? 'active' : ''} onClick={() => setPage('home')}>Expenses</button>
           <button className={page === 'bills' ? 'active' : ''} onClick={() => setPage('bills')}>Bills</button>
+          <button className={page === 'summary' ? 'active' : ''} onClick={() => setPage('summary')}>Summary</button>
           {user.role === 'admin' && (
             <button className={page === 'config' ? 'active' : ''} onClick={() => setPage('config')}>Configuration</button>
           )}
@@ -40,6 +42,7 @@ export default function App() {
       <main>
         {page === 'home' && <Expenses />}
         {page === 'bills' && <Bills />}
+        {page === 'summary' && <SummaryPage />}
         {page === 'config' && <Config />}
       </main>
     </>

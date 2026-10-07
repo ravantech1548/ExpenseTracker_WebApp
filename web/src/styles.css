@@ -129,3 +129,15 @@ button.primary.small { padding: 7px 12px; font-size: 0.9rem; }
 .bill-form .grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(180px, 1fr)); gap: 12px; }
 label.checkbox { flex-direction: row; align-items: center; margin-top: 12px; }
 label.checkbox input { width: auto; }
+
+/* Income summary */
+.summary { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; }
+.summary .full { grid-column: 1 / -1; margin: 0; }
+.tile { display: flex; flex-direction: column; gap: 6px; }
+.tile-label { font-size: 0.8rem; color: var(--muted); text-transform: uppercase; letter-spacing: 0.05em; }
+.tile-value { font-size: 1.4rem; font-weight: 700; color: var(--royal-blue); display: flex; align-items: baseline; gap: 8px; }
+.tile-value .link { font-size: 0.85rem; font-weight: 400; }
+.tile-value.saved { color: var(--eggplant); }
+.income-form { display: flex; gap: 8px; align-items: center; }
+.income-form input { max-width: 160px; }
+@media (max-width: 700px) { .summary { grid-template-columns: 1fr; } }

@@ -284,10 +284,35 @@ app.delete('/api/expenses/:id', requireUser, wrap(async (req, res) => {
   res.json({ ok: true });
 }));
 
+const bad = (msg) => Object.assign(new Error(msg), { status: 400 });
+
+// ---------- monthly income (any approved user) ----------
+
+app.get('/api/income', requireUser, wrap(async (req, res) => {
+  if (!/^\d{4}-\d{2}$/.test(req.query.month || '')) throw bad('Month is required');
+  const { rows } = await q("SELECT amount FROM incomes WHERE month = to_date($1, 'YYYY-MM')", [req.query.month]);
+  res.json({ month: req.query.month, amount: rows[0]?.amount ?? null });
+}));
+
+app.put('/api/income', requireUser, wrap(async (req, res) => {
+  const { month, amount } = req.body || {};
+  if (!/^\d{4}-\d{2}$/.test(month || '')) throw bad('Month is required');
+  if (amount === null || amount === '' || amount === undefined) {
+    await q("DELETE FROM incomes WHERE month = to_date($1, 'YYYY-MM')", [month]);
+    return res.json({ ok: true });
+  }
+  if (!(Number(amount) >= 0)) throw bad('Income must be 0 or more');
+  await q(
+    `INSERT INTO incomes (month, amount) VALUES (to_date($1, 'YYYY-MM'), $2)
+     ON CONFLICT (month) DO UPDATE SET amount = EXCLUDED.amount`,
+    [month, amount],
+  );
+  res.json({ ok: true });
+}));
+
 // ---------- recurring bills (any approved user) ----------
 
 const BILL_FIELDS = ['name', 'category_id', 'provider_id', 'member_id', 'currency', 'usual_amount', 'due_day', 'payment_mode_id', 'active'];
-const bad = (msg) => Object.assign(new Error(msg), { status: 400 });
 
 function billValues(body) {
   const v = BILL_FIELDS.map((f) => (body?.[f] === '' || body?.[f] === undefined ? null : body[f]));
@@ -415,6 +440,12 @@ async function migrate() {
   await q('ALTER TABLE expenses ADD COLUMN IF NOT EXISTS bill_id INT REFERENCES bills(id) ON DELETE SET NULL');
   await q('ALTER TABLE expenses ADD COLUMN IF NOT EXISTS bill_month DATE');
   await q('CREATE UNIQUE INDEX IF NOT EXISTS expenses_bill_month ON expenses (bill_id, bill_month)');
+  // Slice 4: one household income per month, in SGD.
+  await q(`
+    CREATE TABLE IF NOT EXISTS incomes (
+      month  DATE PRIMARY KEY,  -- first day of the month
+      amount NUMERIC(12, 2) NOT NULL CHECK (amount >= 0)
+    )`);
 }
 
 async function ensureAdmin() {

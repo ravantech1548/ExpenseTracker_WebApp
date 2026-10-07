@@ -24,6 +24,12 @@ React frontend, Node.js (Express) API and Postgres, each in its own Docker conta
 - "Mark paid" asks for the amount, payment mode and paid date, and adds the bill to Expenses. The amount is pre-filled with what was paid last time, or the usual amount. "Undo" removes that expense.
 - A due day of 29 to 31 falls on the last day of shorter months.
 
+## Slice 4: monthly income and savings
+
+- One household income per month, in SGD, entered on the Summary page.
+- Summary page for the month: Income, Spent (SGD expenses) and Saved (income minus spent).
+- INR entries (used for mutual funds and stocks) are listed but not counted in savings.
+
 ## Run it
 
 ```bash
